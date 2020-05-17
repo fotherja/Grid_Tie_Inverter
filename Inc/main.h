@@ -64,10 +64,12 @@ void Error_Handler(void);
 #define PhB_I_Sense_GPIO_Port GPIOC
 #define PhA_I_Sense_Pin GPIO_PIN_1
 #define PhA_I_Sense_GPIO_Port GPIOA
+#define NSS_Pin GPIO_PIN_2
+#define NSS_GPIO_Port GPIOA
 #define Line_V_Sense_Pin GPIO_PIN_3
 #define Line_V_Sense_GPIO_Port GPIOA
-#define NSS_Pin GPIO_PIN_4
-#define NSS_GPIO_Port GPIOA
+#define DAC_Out_Pin GPIO_PIN_4
+#define DAC_Out_GPIO_Port GPIOA
 #define DRV_Enable_Pin GPIO_PIN_1
 #define DRV_Enable_GPIO_Port GPIOB
 #define Ph_A_PWM_Pin GPIO_PIN_9

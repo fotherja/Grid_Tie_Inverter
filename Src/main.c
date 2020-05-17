@@ -43,12 +43,12 @@
 #define					PLL_ADJ_RATE_LIMIT				300																				// Limit alterations in our local oscillator freq
 #define					PLL_SESITIVITY_FACTOR			20000																			// Larger values make the PLL less sensitive
 
-#define					PID_Kp										0.15f
-#define					PID_Ki										0.1f
-#define					PID_Kd										0.0001f
+#define					PID_Kp										1.0f
+#define					PID_Ki										1.0f
+#define					PID_Kd										0.0f
 #define					PID_PERIOD								0.0001f
-#define					PID_Min									 -256.0f
-#define					PID_Max										256.0f
+#define					PID_Min									 -1024.0f
+#define					PID_Max										1024.0f
 
 #define					PID_LOOP_PERIOD						16800																			// Timer9 ticks for PID iterations (100us)
 #define					SINE_STEP_PERIOD_BASE			13125																			// Timer9 ticks for Sine lookup index increments for 50Hz
@@ -88,6 +88,8 @@ DMA_HandleTypeDef hdma_adc1;
 DMA_HandleTypeDef hdma_adc2;
 DMA_HandleTypeDef hdma_adc3;
 
+DAC_HandleTypeDef hdac;
+
 SPI_HandleTypeDef hspi1;
 
 TIM_HandleTypeDef htim1;
@@ -123,6 +125,7 @@ static void MX_SPI1_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_ADC3_Init(void);
 static void MX_TIM9_Init(void);
+static void MX_DAC_Init(void);
 /* USER CODE BEGIN PFP */
 void DRV_Config_Calibration(void);
 void DRV_Config_Six_Wire(void);
@@ -183,6 +186,7 @@ int main(void)
   MX_ADC2_Init();
   MX_ADC3_Init();
   MX_TIM9_Init();
+  MX_DAC_Init();
   /* USER CODE BEGIN 2 */
 	//-------------------------------------------------------------------------------------------------------------------------------
 	//###############################################################################################################################
@@ -215,10 +219,12 @@ int main(void)
 		
 		OFFSET_A = CONSTRAIN(OFFSET_A, 1948, 2148);																			// Just for safety, constrain the allowable offset
 		OFFSET_B = CONSTRAIN(OFFSET_B, 1948, 2148);
-
-		DRV_Config_Six_Wire();
 		
+		DRV_Config_Six_Wire();
+		HAL_Delay(10);
+		/*
 	// 6) Ensure the mains is as we expect in terms of voltage before joining at a Zero-Crossing-Point
+		
 		Mains_Good_Bad_Counter = RESTART_MASK_CNT;
 		while(Mains_Good_Bad_Counter < GRID_OK)		{
 			HAL_Delay(1);
@@ -232,6 +238,7 @@ int main(void)
 		
 		Mains_Good_Bad_Counter = STARTUP_MASK_CNT;
 		Await_ZCP(&ADC_Line_V);																													// This blocks until a zero crossing point
+		*/
 		DRV_Config_Three_Wire();																												
 	//------------------------------------------------------------------------------
   /* USER CODE END 2 */
@@ -272,14 +279,16 @@ int main(void)
 				Measured_I = -Get_Current_Median(ADC_Buffer_B, ADC_BUFFER_LENGTH, OFFSET_B); 
 			
 			// Write the measured current to the DAC so we can debug it.
+			uint32_t DAC_Data = (uint32_t)(Measured_I + 2048);
+			HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_Data);
 			
-			PIDSetpointSet(&PID_I, Sine_LookupF[Sine_Index] * I_Output_Demand);						// This is definitely what we want. Our output current in phase with the grid voltage
-			PIDInputSet(&PID_I, (float)Measured_I);																				// I don't trust our current readings very much...
-			PIDCompute(&PID_I);
+			//PIDSetpointSet(&PID_I, Sine_LookupF[Sine_Index] * I_Output_Demand);						// This is definitely what we want. Our output current in phase with the grid voltage
+			//PIDInputSet(&PID_I, (float)Measured_I);																				// I don't trust our current readings very much...
+			//PIDCompute(&PID_I);
 				
-			Duty_Cycle = (int16_t)(Sine_LookupF[Sine_Index] / 1.5) + (int16_t)PIDOutputGet(&PID_I);				// I don't feel this needs to happen. The PID should be able to handle everything itself.
+			Duty_Cycle = (int16_t)(Sine_LookupF[Sine_Index]*2.0f); // + (int16_t)PIDOutputGet(&PID_I);				// I don't feel this needs to happen. The PID should be able to handle everything itself.
 				
-			if(Duty_Cycle >= 0)	{																													// This bit is good. I like!
+			if(Duty_Cycle >= 0)	{																													
 				htim1.Instance->CCR1 = Duty_Cycle;
 				htim1.Instance->CCR2 = 0;							
 			}
@@ -289,7 +298,7 @@ int main(void)
 			}
 		}
 
-
+		/*
 		// Keep tabs on mains RMS and Frequency. Cut out/in when things go out/in range - This works well!
 		static uint16_t	TimeStamp_Protect = 0;		
 		Time_Diff = htim9.Instance->CNT - TimeStamp_Protect;
@@ -335,7 +344,7 @@ int main(void)
 			else if(I_Output_Demand < TARGET_OUTPUT_CURRENT)
 				I_Output_Demand += CURRENT_RAMP_RATE;		
 		}		
-		
+		*/
 		
 	//-------------------------------------------------------------------------------------------------------------------------------
 	//###############################################################################################################################
@@ -531,6 +540,44 @@ static void MX_ADC3_Init(void)
 }
 
 /**
+  * @brief DAC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_DAC_Init(void)
+{
+
+  /* USER CODE BEGIN DAC_Init 0 */
+
+  /* USER CODE END DAC_Init 0 */
+
+  DAC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN DAC_Init 1 */
+
+  /* USER CODE END DAC_Init 1 */
+  /** DAC Initialization 
+  */
+  hdac.Instance = DAC;
+  if (HAL_DAC_Init(&hdac) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** DAC channel OUT1 config 
+  */
+  sConfig.DAC_Trigger = DAC_TRIGGER_NONE;
+  sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+  if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN DAC_Init 2 */
+	HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
+  /* USER CODE END DAC_Init 2 */
+
+}
+
+/**
   * @brief SPI1 Initialization Function
   * @param None
   * @retval None
@@ -584,9 +631,9 @@ static void MX_TIM1_Init(void)
   /* USER CODE BEGIN TIM1_Init 1 */
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 15;
+  htim1.Init.Prescaler = 3;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 255;
+  htim1.Init.Period = 1023;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -716,7 +763,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOE_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(NSS_GPIO_Port, NSS_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(NSS_GPIO_Port, NSS_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(DRV_Enable_GPIO_Port, DRV_Enable_Pin, GPIO_PIN_RESET);
@@ -732,7 +779,7 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = DRV_Enable_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(DRV_Enable_GPIO_Port, &GPIO_InitStruct);
 
 }
@@ -741,7 +788,7 @@ static void MX_GPIO_Init(void)
 void DRV_Config_Calibration(void)
 {
 	uint8_t DRV_dataTxA[2] = {0x10, 0x00};																						// CR1: 6 wire mode  		
-	uint8_t DRV_dataTxB[2] = {0x18, 0x34};																						// CR2: Current shunt amp gain = 40 & enable calibration mode
+	uint8_t DRV_dataTxB[2] = {0x18, 0x38};																						// CR2: Current shunt amp gain = 40 & enable calibration mode
 	
 	HAL_GPIO_WritePin(NSS_GPIO_Port, NSS_Pin, GPIO_PIN_RESET);										
 	HAL_SPI_Transmit(&hspi1, DRV_dataTxA, 2, HAL_MAX_DELAY);
@@ -756,7 +803,7 @@ void DRV_Config_Calibration(void)
 void DRV_Config_Six_Wire(void)
 {
 	uint8_t DRV_dataTxA[2] = {0x10, 0x00};																						// CR1: 6 wire mode  
-	uint8_t DRV_dataTxC[2] = {0x18, 0x04};																						// CR2: Current shunt amp gain = 40 & disable calibration more 
+	uint8_t DRV_dataTxC[2] = {0x18, 0x08};																						// CR2: Current shunt amp gain = 40 & disable calibration more 
 	
 	HAL_GPIO_WritePin(NSS_GPIO_Port, NSS_Pin, GPIO_PIN_RESET);												
 	HAL_SPI_Transmit(&hspi1, DRV_dataTxA, 2, HAL_MAX_DELAY);
