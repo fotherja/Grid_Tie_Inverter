@@ -40,8 +40,7 @@
 #define					ADC_OFFSET								2048
 #define         SINE_STEPS          			256                         							// Number of steps to build our sinewave in
 
-#define					PLL_ADJ_RATE_LIMIT				300																				// Limit alterations in our local oscillator freq
-#define					PLL_SESITIVITY_FACTOR			20000																			// Larger values make the PLL less sensitive
+#define					PLL_ADJ_RATE_LIMIT				500.0f																		// Limit alterations in our local oscillator freq
 
 #define					PID_Kp										1.0f
 #define					PID_Ki										1.0f
@@ -112,7 +111,9 @@ float    		Sine_LookupF[256]          		=     {0.00,6.28,12.56,18.83,25.09,31.34
 																								-236.51,-234.04,-231.42,-228.67,-225.77,-222.74,-219.58,-216.28,-212.86,-209.30,-205.62,-201.82,-197.89,-193.85,-189.68,-185.41,
 																								-181.02,-176.52,-171.92,-167.21,-162.40,-157.50,-152.50,-147.41,-142.23,-136.96,-131.61,-126.18,-120.68,-115.10,-109.45,-103.74,
 																								-97.97,-92.13,-86.24,-80.30,-74.31,-68.28,-62.20,-56.09,-49.94,-43.77,-37.56,-31.34,-25.09,-18.83,-12.56,-6.28};
-																								
+										
+
+int32_t Debug_PLL_Out, Debug_PLL_iterm, Debug_PLL_In;																								
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -151,12 +152,12 @@ int main(void)
 	static int16_t		ADC_Line_V;																								
 																								
 	static PIDControl PID_I;																													// PIDControl struct instance	
+	static PIDControl	PLL_PID;
 															
 	static int16_t		OFFSET_A						= 0;				
 	static int16_t		OFFSET_B						= 0;
 		
 	static uint32_t 	Mains_RMS;	
-	static int32_t 		Freq_Offset;
 	static float			I_Output_Demand 		= START_UP_CURRENT;																			
 	static int16_t		Measured_I;																											// Stores our most up to date output current reading 																								
 	
@@ -198,6 +199,8 @@ int main(void)
 		
 	// 2) Configure our PID parameters
 		PIDInit(&PID_I, PID_Kp, PID_Ki, PID_Kd, PID_PERIOD, PID_Min, PID_Max, AUTOMATIC, DIRECT);
+		PIDInit(&PLL_PID, 2.0e-3, 5.0e-5, 0.0, 7.8e-5, -PLL_ADJ_RATE_LIMIT, PLL_ADJ_RATE_LIMIT, AUTOMATIC, DIRECT);
+		PIDSetpointSet(&PLL_PID, 0.0);
 	
 	// 3) Start our PWM driver which uses Timer1 to power our H-bridge. Both channels start with Duty = 0
 		HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);																			
@@ -222,9 +225,8 @@ int main(void)
 		
 		DRV_Config_Six_Wire();
 		HAL_Delay(10);
-		/*
-	// 6) Ensure the mains is as we expect in terms of voltage before joining at a Zero-Crossing-Point
 		
+	// 6) Ensure the mains is as we expect in terms of voltage before joining at a Zero-Crossing-Point
 		Mains_Good_Bad_Counter = RESTART_MASK_CNT;
 		while(Mains_Good_Bad_Counter < GRID_OK)		{
 			HAL_Delay(1);
@@ -238,7 +240,6 @@ int main(void)
 		
 		Mains_Good_Bad_Counter = STARTUP_MASK_CNT;
 		Await_ZCP(&ADC_Line_V);																													// This blocks until a zero crossing point
-		*/
 		DRV_Config_Three_Wire();																												
 	//------------------------------------------------------------------------------
   /* USER CODE END 2 */
@@ -254,14 +255,16 @@ int main(void)
 			TimeStamp_Sine += SINE_STEP_PERIOD_BASE; 				
 			
 			int32_t Delayed_Line_V_Readings = Signal_Delay(ADC_Line_V - ADC_OFFSET);			
-			int32_t Signal_Multiple = (int32_t)Sine_LookupF[Sine_Index] * Delayed_Line_V_Readings;			
-			Freq_Offset = Integral(Signal_Multiple) / PLL_SESITIVITY_FACTOR;
-			Freq_Offset = CONSTRAIN(Freq_Offset, -PLL_ADJ_RATE_LIMIT, PLL_ADJ_RATE_LIMIT);
-							
-			TimeStamp_Sine += (uint16_t)Freq_Offset;
+			PLL_PID.input = Sine_LookupF[Sine_Index] * (float)Delayed_Line_V_Readings;		
+			PIDCompute(&PLL_PID);							
 			
-			if(++Sine_Index >= SINE_STEPS)
-				Sine_Index = 0;
+			TimeStamp_Sine -= (int32_t)PLL_PID.output;
+			
+			if(++Sine_Index >= SINE_STEPS)	{Sine_Index = 0;}
+			
+			Debug_PLL_iterm = (int32_t)PLL_PID.iTerm;
+			Debug_PLL_Out = (int32_t)PLL_PID.output;
+			Debug_PLL_In = (int32_t)PLL_PID.input;
 		}		
 		
 		
@@ -274,9 +277,9 @@ int main(void)
 			static int16_t Duty_Cycle = 0;
 			
 			if(Duty_Cycle >= 0)	
-				Measured_I = Get_Current_Median(ADC_Buffer_A, ADC_BUFFER_LENGTH, OFFSET_A);				
+				Measured_I = -Get_Current_Median(ADC_Buffer_A, ADC_BUFFER_LENGTH, OFFSET_A);				
 			else	
-				Measured_I = -Get_Current_Median(ADC_Buffer_B, ADC_BUFFER_LENGTH, OFFSET_B); 
+				Measured_I = Get_Current_Median(ADC_Buffer_B, ADC_BUFFER_LENGTH, OFFSET_B); 
 			
 			// Write the measured current to the DAC so we can debug it.
 			uint32_t DAC_Data = (uint32_t)(Measured_I + 2048);
@@ -286,7 +289,7 @@ int main(void)
 			//PIDInputSet(&PID_I, (float)Measured_I);																				// I don't trust our current readings very much...
 			//PIDCompute(&PID_I);
 				
-			Duty_Cycle = (int16_t)(Sine_LookupF[Sine_Index]*2.0f); // + (int16_t)PIDOutputGet(&PID_I);				// I don't feel this needs to happen. The PID should be able to handle everything itself.
+			Duty_Cycle = (int16_t)(Sine_LookupF[Sine_Index]*1.6f); // + (int16_t)PIDOutputGet(&PID_I);				// I don't feel this needs to happen. The PID should be able to handle everything itself.
 				
 			if(Duty_Cycle >= 0)	{																													
 				htim1.Instance->CCR1 = Duty_Cycle;
