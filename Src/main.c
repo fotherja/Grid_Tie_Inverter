@@ -39,15 +39,19 @@
 /* USER CODE BEGIN PD */
 #define					ADC_OFFSET								2048
 #define         SINE_STEPS          			256                         							// Number of steps to build our sinewave in
-
+  
+#define					PLL_Kp										2.0e-3f
+#define					PLL_Ki										5.0e-5f
+#define					PLL_Kd										0.0f
+#define					PLL_PERIOD								7.8e-5f
 #define					PLL_ADJ_RATE_LIMIT				500.0f																		// Limit alterations in our local oscillator freq
 
 #define					PID_Kp										1.0f
-#define					PID_Ki										1.0f
+#define					PID_Ki										400.0f
 #define					PID_Kd										0.0f
-#define					PID_PERIOD								0.0001f
-#define					PID_Min									 -1024.0f
-#define					PID_Max										1024.0f
+#define					PID_PERIOD								1.0e-4f
+#define					PID_Min									 -512.0f
+#define					PID_Max										512.0f
 
 #define					PID_LOOP_PERIOD						16800																			// Timer9 ticks for PID iterations (100us)
 #define					SINE_STEP_PERIOD_BASE			13125																			// Timer9 ticks for Sine lookup index increments for 50Hz
@@ -67,9 +71,9 @@
 #define					GRID_BAD_FAIL_RATE				11																				//
 #define					GRID_OK										0
 
-#define					START_UP_CURRENT					0.25f																			// At startup we gradually increase our output current from this
+#define					START_UP_CURRENT					0.05f																			// At startup we gradually increase our output current from this
 #define					TARGET_OUTPUT_CURRENT			3.0f																			// To this
-#define					CURRENT_RAMP_RATE					0.00004f																		// Every PROTECT_LOOP_PERIOD this increments into I output demand
+#define					CURRENT_RAMP_RATE					2.0e-5f																		// Every PROTECT_LOOP_PERIOD this increments into I output demand
 
 #define 				CONSTRAIN(x,lower,upper)	((x)<(lower)?(lower):((x)>(upper)?(upper):(x)))
 #define					MAX(x, y) 								(((x) > (y)) ? (x) : (y))
@@ -111,9 +115,7 @@ float    		Sine_LookupF[256]          		=     {0.00,6.28,12.56,18.83,25.09,31.34
 																								-236.51,-234.04,-231.42,-228.67,-225.77,-222.74,-219.58,-216.28,-212.86,-209.30,-205.62,-201.82,-197.89,-193.85,-189.68,-185.41,
 																								-181.02,-176.52,-171.92,-167.21,-162.40,-157.50,-152.50,-147.41,-142.23,-136.96,-131.61,-126.18,-120.68,-115.10,-109.45,-103.74,
 																								-97.97,-92.13,-86.24,-80.30,-74.31,-68.28,-62.20,-56.09,-49.94,-43.77,-37.56,-31.34,-25.09,-18.83,-12.56,-6.28};
-										
-
-int32_t Debug_PLL_Out, Debug_PLL_iterm, Debug_PLL_In;																								
+																															
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -149,7 +151,7 @@ int main(void)
   /* USER CODE BEGIN 1 */
 	static int16_t 		ADC_Buffer_A[ADC_BUFFER_LENGTH];																// The DMA keeps these buffers filled with fresh ADC readings
 	static int16_t 		ADC_Buffer_B[ADC_BUFFER_LENGTH];
-	static int16_t		ADC_Line_V;																								
+	static int16_t		ADC_Interleaved[6];																							//
 																								
 	static PIDControl PID_I;																													// PIDControl struct instance	
 	static PIDControl	PLL_PID;
@@ -195,11 +197,11 @@ int main(void)
 	// 1) Start the 3 ADC engines
 		HAL_ADC_Start_DMA(&hadc1, (uint32_t*)ADC_Buffer_A, ADC_BUFFER_LENGTH);
 		HAL_ADC_Start_DMA(&hadc2, (uint32_t*)ADC_Buffer_B, ADC_BUFFER_LENGTH);
-		HAL_ADC_Start_DMA(&hadc3, (uint32_t*)&ADC_Line_V, 1);	
+		HAL_ADC_Start_DMA(&hadc3, (uint32_t*)ADC_Interleaved, 6);	
 		
 	// 2) Configure our PID parameters
 		PIDInit(&PID_I, PID_Kp, PID_Ki, PID_Kd, PID_PERIOD, PID_Min, PID_Max, AUTOMATIC, DIRECT);
-		PIDInit(&PLL_PID, 2.0e-3, 5.0e-5, 0.0, 7.8e-5, -PLL_ADJ_RATE_LIMIT, PLL_ADJ_RATE_LIMIT, AUTOMATIC, DIRECT);
+		PIDInit(&PLL_PID, PLL_Kp, PLL_Ki, PLL_Kd, PLL_PERIOD, -PLL_ADJ_RATE_LIMIT, PLL_ADJ_RATE_LIMIT, AUTOMATIC, DIRECT);
 		PIDSetpointSet(&PLL_PID, 0.0);
 	
 	// 3) Start our PWM driver which uses Timer1 to power our H-bridge. Both channels start with Duty = 0
@@ -213,12 +215,12 @@ int main(void)
 	// 5) Read the shorted current amplifier to obtain their respective offsets 
 		for(int8_t i = 0; i < 10; i++)	{
 			HAL_Delay(100);
-			OFFSET_A += Get_Current_Median(ADC_Buffer_A, ADC_BUFFER_LENGTH, 0.0);
-			OFFSET_B += Get_Current_Median(ADC_Buffer_B, ADC_BUFFER_LENGTH, 0.0);
+			OFFSET_A += Get_Median(ADC_Buffer_A, ADC_BUFFER_LENGTH, 0.0);
+			OFFSET_B += Get_Median(ADC_Buffer_B, ADC_BUFFER_LENGTH, 0.0);
 		}
 		
-		OFFSET_A /= -10;																																// We just summed up 10 readings so /10 to get avg
-		OFFSET_B /= -10;
+		OFFSET_A /= 10;																																	// We just summed up 10 readings so /10 to get avg
+		OFFSET_B /= 10;
 		
 		OFFSET_A = CONSTRAIN(OFFSET_A, 1948, 2148);																			// Just for safety, constrain the allowable offset
 		OFFSET_B = CONSTRAIN(OFFSET_B, 1948, 2148);
@@ -230,7 +232,7 @@ int main(void)
 		Mains_Good_Bad_Counter = RESTART_MASK_CNT;
 		while(Mains_Good_Bad_Counter < GRID_OK)		{
 			HAL_Delay(1);
-			Mains_RMS = Integrate_Mains_RMS(ADC_Line_V - ADC_OFFSET);											// Update our Mains RMS measurement
+			Mains_RMS = Integrate_Mains_RMS(ADC_Interleaved[0] - ADC_OFFSET);							// Update our Mains RMS measurement
 			
 			if(Mains_RMS > RMS_UPPER_LIMIT || Mains_RMS < RMS_LOWER_LIMIT)
 				Mains_Good_Bad_Counter = RESTART_MASK_CNT;																	// If out of range, reset the count
@@ -239,7 +241,7 @@ int main(void)
 		}
 		
 		Mains_Good_Bad_Counter = STARTUP_MASK_CNT;
-		Await_ZCP(&ADC_Line_V);																													// This blocks until a zero crossing point
+		Await_ZCP(ADC_Interleaved);																											// This blocks until a zero crossing point
 		DRV_Config_Three_Wire();																												
 	//------------------------------------------------------------------------------
   /* USER CODE END 2 */
@@ -254,65 +256,78 @@ int main(void)
 		if(Time_Diff > SINE_STEP_PERIOD_BASE && Time_Diff < SINE_STEP_PERIOD_BASE_B) {   																				   
 			TimeStamp_Sine += SINE_STEP_PERIOD_BASE; 				
 			
-			int32_t Delayed_Line_V_Readings = Signal_Delay(ADC_Line_V - ADC_OFFSET);			
+			int32_t Delayed_Line_V_Readings = Signal_Delay(ADC_Interleaved[0] - ADC_OFFSET);			
 			PLL_PID.input = Sine_LookupF[Sine_Index] * (float)Delayed_Line_V_Readings;		
 			PIDCompute(&PLL_PID);							
 			
-			TimeStamp_Sine -= (int32_t)PLL_PID.output;
-			
+			TimeStamp_Sine -= (int32_t)PLL_PID.output;			
 			if(++Sine_Index >= SINE_STEPS)	{Sine_Index = 0;}
-			
-			Debug_PLL_iterm = (int32_t)PLL_PID.iTerm;
-			Debug_PLL_Out = (int32_t)PLL_PID.output;
-			Debug_PLL_In = (int32_t)PLL_PID.input;
 		}		
 		
 		
 		// Run the PID if its period has elapsed - I believe this is where our problems lie!
-		static uint16_t	TimeStamp_PID = 0;		
+		static uint16_t	TimeStamp_PID = 0;	static int16_t Duty_Cycle = 0;	
 		Time_Diff = htim9.Instance->CNT - TimeStamp_PID;
 		if(Time_Diff > PID_LOOP_PERIOD) {   																				   
-			TimeStamp_PID += PID_LOOP_PERIOD;
+			TimeStamp_PID += PID_LOOP_PERIOD;			
 			
-			static int16_t Duty_Cycle = 0;
-			
+			// Get the median of the last ADC_BUFFER_LENGTH current readings
 			if(Duty_Cycle >= 0)	
-				Measured_I = -Get_Current_Median(ADC_Buffer_A, ADC_BUFFER_LENGTH, OFFSET_A);				
+				Measured_I = -Get_Median(ADC_Buffer_B, ADC_BUFFER_LENGTH, OFFSET_B);				
 			else	
-				Measured_I = Get_Current_Median(ADC_Buffer_B, ADC_BUFFER_LENGTH, OFFSET_B); 
+				Measured_I = Get_Median(ADC_Buffer_A, ADC_BUFFER_LENGTH, OFFSET_A); 
 			
-			// Write the measured current to the DAC so we can debug it.
-			uint32_t DAC_Data = (uint32_t)(Measured_I + 2048);
-			HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_Data);
+			// Get the median of the last 3 supply voltage readings
+			int16_t ADC_V_Supply_Buff[3];
+			ADC_V_Supply_Buff[0] = ADC_Interleaved[1];
+			ADC_V_Supply_Buff[1] = ADC_Interleaved[3];
+			ADC_V_Supply_Buff[2] = ADC_Interleaved[5];			
+			int16_t V_Supply = Get_Median(ADC_V_Supply_Buff, 3, 0);
 			
-			//PIDSetpointSet(&PID_I, Sine_LookupF[Sine_Index] * I_Output_Demand);						// This is definitely what we want. Our output current in phase with the grid voltage
-			//PIDInputSet(&PID_I, (float)Measured_I);																				// I don't trust our current readings very much...
-			//PIDCompute(&PID_I);
+			int16_t ADC_V_Line_Buff[3];
+			ADC_V_Line_Buff[0] = ADC_Interleaved[0];
+			ADC_V_Line_Buff[1] = ADC_Interleaved[2];
+			ADC_V_Line_Buff[2] = ADC_Interleaved[4];			
+			int16_t V_Line = Get_Median(ADC_V_Line_Buff, 3, 2048);
+			
+			// 1) Feedforward control - use the measured mains voltage to calculate our duty.
+			int32_t Duty_Feedforward = (1370 * (int32_t)V_Line) / V_Supply;
+					
+			// 2) PI control
+			PIDSetpointSet(&PID_I, Sine_LookupF[Sine_Index] * -I_Output_Demand);						
+			PIDInputSet(&PID_I, (float)Measured_I);																				
+			PIDCompute(&PID_I);
 				
-			Duty_Cycle = (int16_t)(Sine_LookupF[Sine_Index]*1.6f); // + (int16_t)PIDOutputGet(&PID_I);				// I don't feel this needs to happen. The PID should be able to handle everything itself.
+			Duty_Cycle = (int16_t)(Duty_Feedforward) + (int16_t)PIDOutputGet(&PID_I);			//(Sine_LookupF[Sine_Index] * -0.4);
 				
 			if(Duty_Cycle >= 0)	{																													
-				htim1.Instance->CCR1 = Duty_Cycle;
-				htim1.Instance->CCR2 = 0;							
+				htim1.Instance->CCR1 = 0;
+				htim1.Instance->CCR2 = Duty_Cycle;							
 			}
 			else	{
-				htim1.Instance->CCR1 = 0;
-				htim1.Instance->CCR2 = -Duty_Cycle;
+				htim1.Instance->CCR1 = -Duty_Cycle;
+				htim1.Instance->CCR2 = 0;
 			}
+			
+			// Write to the DAC so we can debug
+			uint32_t DAC_Data = (uint32_t)(Measured_I + 2048);
+			HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_Data);			
 		}
 
-		/*
+		
 		// Keep tabs on mains RMS and Frequency. Cut out/in when things go out/in range - This works well!
 		static uint16_t	TimeStamp_Protect = 0;		
 		Time_Diff = htim9.Instance->CNT - TimeStamp_Protect;
 		if(Time_Diff > PROTECT_LOOP_PERIOD) {   																				   
 			TimeStamp_Protect += PROTECT_LOOP_PERIOD;		
 			
-			Mains_RMS = Integrate_Mains_RMS(ADC_Line_V - ADC_OFFSET);											// Update our mains RMS measurement
+			Mains_RMS = Integrate_Mains_RMS(ADC_Interleaved[0] - ADC_OFFSET);							// Update our mains RMS measurement
 
 			//if(Freq_Offset > FREQ_UPPER_LIMIT || Freq_Offset < FREQ_LOWER_LIMIT) 
 			//	Mains_Good_Bad_Counter -= GRID_BAD_FAIL_RATE;
 			if(Mains_RMS > RMS_UPPER_LIMIT || Mains_RMS < RMS_LOWER_LIMIT)
+				Mains_Good_Bad_Counter -= GRID_BAD_FAIL_RATE;
+			if(ADC_Interleaved[1] > 2048)
 				Mains_Good_Bad_Counter -= GRID_BAD_FAIL_RATE;
 			
 			if(Mains_Good_Bad_Counter < RUNNING_MASK_CNT)	
@@ -330,7 +345,7 @@ int main(void)
 
 				while(Mains_Good_Bad_Counter < GRID_OK)	{																		// Remain paused until the mains RMS goes back in range
 					HAL_Delay(1);
-					Mains_RMS = Integrate_Mains_RMS(ADC_Line_V - ADC_OFFSET);				
+					Mains_RMS = Integrate_Mains_RMS(ADC_Interleaved[0] - ADC_OFFSET);				
 					
 					if(Mains_RMS > RMS_UPPER_LIMIT || Mains_RMS < RMS_LOWER_LIMIT)
 						Mains_Good_Bad_Counter = RESTART_MASK_CNT;
@@ -341,13 +356,12 @@ int main(void)
 				Mains_Good_Bad_Counter = STARTUP_MASK_CNT;
 				DRV_Enable();
 				DRV_Config_Six_Wire();				
-				Await_ZCP(&ADC_Line_V);
+				Await_ZCP(ADC_Interleaved);
 				DRV_Config_Three_Wire();	
 			}
 			else if(I_Output_Demand < TARGET_OUTPUT_CURRENT)
 				I_Output_Demand += CURRENT_RAMP_RATE;		
 		}		
-		*/
 		
 	//-------------------------------------------------------------------------------------------------------------------------------
 	//###############################################################################################################################
@@ -515,13 +529,13 @@ static void MX_ADC3_Init(void)
   hadc3.Instance = ADC3;
   hadc3.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV8;
   hadc3.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc3.Init.ScanConvMode = DISABLE;
+  hadc3.Init.ScanConvMode = ENABLE;
   hadc3.Init.ContinuousConvMode = ENABLE;
   hadc3.Init.DiscontinuousConvMode = DISABLE;
   hadc3.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc3.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc3.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc3.Init.NbrOfConversion = 1;
+  hadc3.Init.NbrOfConversion = 2;
   hadc3.Init.DMAContinuousRequests = ENABLE;
   hadc3.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc3) != HAL_OK)
@@ -532,7 +546,15 @@ static void MX_ADC3_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_3;
   sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
+  sConfig.SamplingTime = ADC_SAMPLETIME_144CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc3, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time. 
+  */
+  sConfig.Channel = ADC_CHANNEL_12;
+  sConfig.Rank = 2;
   if (HAL_ADC_ConfigChannel(&hadc3, &sConfig) != HAL_OK)
   {
     Error_Handler();

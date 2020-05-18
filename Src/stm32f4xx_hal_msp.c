@@ -181,10 +181,17 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     /* Peripheral clock enable */
     __HAL_RCC_ADC3_CLK_ENABLE();
   
+    __HAL_RCC_GPIOC_CLK_ENABLE();
     __HAL_RCC_GPIOA_CLK_ENABLE();
     /**ADC3 GPIO Configuration    
+    PC2     ------> ADC3_IN12
     PA3     ------> ADC3_IN3 
     */
+    GPIO_InitStruct.Pin = V_Supply_Sense_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(V_Supply_Sense_GPIO_Port, &GPIO_InitStruct);
+
     GPIO_InitStruct.Pin = Line_V_Sense_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -271,8 +278,11 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* hadc)
     __HAL_RCC_ADC3_CLK_DISABLE();
   
     /**ADC3 GPIO Configuration    
+    PC2     ------> ADC3_IN12
     PA3     ------> ADC3_IN3 
     */
+    HAL_GPIO_DeInit(V_Supply_Sense_GPIO_Port, V_Supply_Sense_Pin);
+
     HAL_GPIO_DeInit(Line_V_Sense_GPIO_Port, Line_V_Sense_Pin);
 
     /* ADC3 DMA DeInit */

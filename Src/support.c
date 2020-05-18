@@ -43,7 +43,7 @@ int32_t Signal_Delay(int16_t datum)
 
 
 // Returns the median value of a buffer of unsigned values. Note FILTER_LENGTH must be odd in this implimentation 
-int16_t Get_Current_Median(int16_t *Buffer, int8_t FILTER_LENGTH, int16_t OFFSET)
+int16_t Get_Median(int16_t *Buffer, int8_t FILTER_LENGTH, int16_t OFFSET)
 {		
 	// Copy the buffer otherwise the DMA could overwrite a value mid calculation
 	int16_t Buffer_Copy[FILTER_LENGTH];	
@@ -63,7 +63,7 @@ int16_t Get_Current_Median(int16_t *Buffer, int8_t FILTER_LENGTH, int16_t OFFSET
 			}
 	}	
 	
-	int16_t median = OFFSET - Buffer_Copy[FILTER_LENGTH/2];	
+	int16_t median = Buffer_Copy[FILTER_LENGTH/2] - OFFSET;	
 	return(median);
 }
 
