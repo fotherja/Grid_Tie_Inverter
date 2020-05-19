@@ -16,10 +16,6 @@
   *
   ******************************************************************************
   */		
-	// Changes -> Increased rate of PLL correction
-	// Changed DMA to half-words
-	// 
-	//
 /* USER CODE END Header */
 
 /* Includes ------------------------------------------------------------------*/
@@ -40,30 +36,36 @@
 #define					ADC_OFFSET								2048
 #define         SINE_STEPS          			256                         							// Number of steps to build our sinewave in
   
-#define					PLL_Kp										2.0e-3f
-#define					PLL_Ki										5.0e-5f
+#define					PLL_Kp										1.0e-5f
+#define					PLL_Ki										4.0e-7f
 #define					PLL_Kd										0.0f
 #define					PLL_PERIOD								7.8e-5f
 #define					PLL_ADJ_RATE_LIMIT				500.0f																		// Limit alterations in our local oscillator freq
 
-#define					PID_Kp										1.0f
-#define					PID_Ki										400.0f
+#define					PID_Kp										0.35f
+#define					PID_Ki										200.0f
 #define					PID_Kd										0.0f
 #define					PID_PERIOD								1.0e-4f
-#define					PID_Min									 -512.0f
-#define					PID_Max										512.0f
+#define					PID_Limit									512.0f
+
+#define					DUTY_LIMIT								1024
+#define					V_SUPPLY_K								15.7																			// Divison factor for supply voltage
+#define					V_LINE_K									30.4																			// Divison factor for line voltage
+#define					PROPORTIONALITY_K					1975																			// (DUTY_LIMIT * V_LINE_K / V_SUPPLY_K)	(seems to minimise the voltage diff)
+
+#define					V_SUPPLY_CUTOUT						3800
 
 #define					PID_LOOP_PERIOD						16800																			// Timer9 ticks for PID iterations (100us)
 #define					SINE_STEP_PERIOD_BASE			13125																			// Timer9 ticks for Sine lookup index increments for 50Hz
-#define					SINE_STEP_PERIOD_BASE_B		40000
+#define					SINE_STEP_PERIOD_BASE_B		40000																			// Since we're adding and subtracting from the timestamp we need this value
 #define					PROTECT_LOOP_PERIOD				33600																			// Timer9 ticks for protection routine (200us)
 
 #define					ADC_BUFFER_LENGTH					11																				// SHOULD BE AN ODD NUMBER
 
-#define					RMS_UPPER_LIMIT						500000																		// Actually, we don't bother with the root...
-#define					RMS_LOWER_LIMIT						300000
-#define					FREQ_UPPER_LIMIT					131
-#define					FREQ_LOWER_LIMIT				 -131
+#define					RMS_UPPER_LIMIT						1500000																		// Actually, we don't bother with the root...
+#define					RMS_LOWER_LIMIT						1200000
+#define					FREQ_UPPER_LIMIT					130																				// Corrosponds to +/- 0.5Hz
+#define					FREQ_LOWER_LIMIT				 -130
 
 #define					STARTUP_MASK_CNT					5000																			// Allow 100ms to sync phase with the mains at startup 
 #define					RUNNING_MASK_CNT					3000																			// Once running, if out of phase for > 60ms, we shut off
@@ -72,8 +74,8 @@
 #define					GRID_OK										0
 
 #define					START_UP_CURRENT					0.05f																			// At startup we gradually increase our output current from this
-#define					TARGET_OUTPUT_CURRENT			3.0f																			// To this
-#define					CURRENT_RAMP_RATE					2.0e-5f																		// Every PROTECT_LOOP_PERIOD this increments into I output demand
+#define					TARGET_OUTPUT_CURRENT			3.50f																			// To this
+#define					CURRENT_RAMP_RATE					1.0e-4f																		// Every PROTECT_LOOP_PERIOD this increments into I output demand
 
 #define 				CONSTRAIN(x,lower,upper)	((x)<(lower)?(lower):((x)>(upper)?(upper):(x)))
 #define					MAX(x, y) 								(((x) > (y)) ? (x) : (y))
@@ -200,7 +202,7 @@ int main(void)
 		HAL_ADC_Start_DMA(&hadc3, (uint32_t*)ADC_Interleaved, 6);	
 		
 	// 2) Configure our PID parameters
-		PIDInit(&PID_I, PID_Kp, PID_Ki, PID_Kd, PID_PERIOD, PID_Min, PID_Max, AUTOMATIC, DIRECT);
+		PIDInit(&PID_I, PID_Kp, PID_Ki, PID_Kd, PID_PERIOD, -PID_Limit, PID_Limit, AUTOMATIC, DIRECT);
 		PIDInit(&PLL_PID, PLL_Kp, PLL_Ki, PLL_Kd, PLL_PERIOD, -PLL_ADJ_RATE_LIMIT, PLL_ADJ_RATE_LIMIT, AUTOMATIC, DIRECT);
 		PIDSetpointSet(&PLL_PID, 0.0);
 	
@@ -250,22 +252,23 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {				
-		// Keeps our local oscillator synchronised to the grid by implimenting a PLL - This works well!
+		// Keeps our local oscillator synchronised to the grid by implimenting a PLL with PI controller
 		static uint16_t	TimeStamp_Sine = 0, Sine_Index = 0, Time_Diff;
 		Time_Diff = (uint16_t)htim9.Instance->CNT - TimeStamp_Sine;
 		if(Time_Diff > SINE_STEP_PERIOD_BASE && Time_Diff < SINE_STEP_PERIOD_BASE_B) {   																				   
 			TimeStamp_Sine += SINE_STEP_PERIOD_BASE; 				
 			
-			int32_t Delayed_Line_V_Readings = Signal_Delay(ADC_Interleaved[0] - ADC_OFFSET);			
-			PLL_PID.input = Sine_LookupF[Sine_Index] * (float)Delayed_Line_V_Readings;		
-			PIDCompute(&PLL_PID);							
+			int32_t Delayed_Line_V_Readings = Signal_Delay(ADC_Interleaved[0] - ADC_OFFSET);
+			int32_t Signal_Multiple = (int32_t)Sine_LookupF[Sine_Index] * Delayed_Line_V_Readings;
+			PLL_PID.input = (float)Integral(Signal_Multiple);		
+			PIDCompute(&PLL_PID);	
 			
 			TimeStamp_Sine -= (int32_t)PLL_PID.output;			
 			if(++Sine_Index >= SINE_STEPS)	{Sine_Index = 0;}
 		}		
 		
 		
-		// Run the PID if its period has elapsed - I believe this is where our problems lie!
+		// Run the PID if its period has elapsed
 		static uint16_t	TimeStamp_PID = 0;	static int16_t Duty_Cycle = 0;	
 		Time_Diff = htim9.Instance->CNT - TimeStamp_PID;
 		if(Time_Diff > PID_LOOP_PERIOD) {   																				   
@@ -278,28 +281,28 @@ int main(void)
 				Measured_I = Get_Median(ADC_Buffer_A, ADC_BUFFER_LENGTH, OFFSET_A); 
 			
 			// Get the median of the last 3 supply voltage readings
-			int16_t ADC_V_Supply_Buff[3];
-			ADC_V_Supply_Buff[0] = ADC_Interleaved[1];
-			ADC_V_Supply_Buff[1] = ADC_Interleaved[3];
-			ADC_V_Supply_Buff[2] = ADC_Interleaved[5];			
-			int16_t V_Supply = Get_Median(ADC_V_Supply_Buff, 3, 0);
+			int16_t ADC_V_Supply_Buff[3], ADC_V_Line_Buff[3];
+			ADC_V_Line_Buff[0] 		= ADC_Interleaved[0];
+			ADC_V_Supply_Buff[0] 	= ADC_Interleaved[1];
+			ADC_V_Line_Buff[1] 		= ADC_Interleaved[2];
+			ADC_V_Supply_Buff[1] 	= ADC_Interleaved[3];
+			ADC_V_Line_Buff[2] 		= ADC_Interleaved[4];
+			ADC_V_Supply_Buff[2] 	= ADC_Interleaved[5];	
+			int16_t V_Supply 			= Get_Median(ADC_V_Supply_Buff, 3, 0);			
+			int16_t V_Line 				= Get_Median(ADC_V_Line_Buff, 3, 2048);			
 			
-			int16_t ADC_V_Line_Buff[3];
-			ADC_V_Line_Buff[0] = ADC_Interleaved[0];
-			ADC_V_Line_Buff[1] = ADC_Interleaved[2];
-			ADC_V_Line_Buff[2] = ADC_Interleaved[4];			
-			int16_t V_Line = Get_Median(ADC_V_Line_Buff, 3, 2048);
-			
-			// 1) Feedforward control - use the measured mains voltage to calculate our duty.
-			int32_t Duty_Feedforward = (1370 * (int32_t)V_Line) / V_Supply;
+			// 1) Feedforward control - use the measured mains voltage to calculate our duty to output zero current.
+			int32_t Duty_Feedforward = (PROPORTIONALITY_K * (int32_t)V_Line) / V_Supply;
 					
-			// 2) PI control
+			// 2) PI control - On top of FF control, adjust our duty to achieve the current setpoint
 			PIDSetpointSet(&PID_I, Sine_LookupF[Sine_Index] * -I_Output_Demand);						
 			PIDInputSet(&PID_I, (float)Measured_I);																				
 			PIDCompute(&PID_I);
 				
-			Duty_Cycle = (int16_t)(Duty_Feedforward) + (int16_t)PIDOutputGet(&PID_I);			//(Sine_LookupF[Sine_Index] * -0.4);
-				
+			// 3) Write our duty and constrain it
+			Duty_Cycle = (int16_t)(Duty_Feedforward) + (int16_t)PIDOutputGet(&PID_I);			
+			Duty_Cycle = CONSTRAIN(Duty_Cycle, -DUTY_LIMIT, DUTY_LIMIT); 	
+				 
 			if(Duty_Cycle >= 0)	{																													
 				htim1.Instance->CCR1 = 0;
 				htim1.Instance->CCR2 = Duty_Cycle;							
@@ -310,8 +313,8 @@ int main(void)
 			}
 			
 			// Write to the DAC so we can debug
-			uint32_t DAC_Data = (uint32_t)(Measured_I + 2048);
-			HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_Data);			
+			//uint32_t DAC_Data = (uint32_t)(Measured_I + 2048);
+			//HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, DAC_Data);			
 		}
 
 		
@@ -323,14 +326,15 @@ int main(void)
 			
 			Mains_RMS = Integrate_Mains_RMS(ADC_Interleaved[0] - ADC_OFFSET);							// Update our mains RMS measurement
 
-			//if(Freq_Offset > FREQ_UPPER_LIMIT || Freq_Offset < FREQ_LOWER_LIMIT) 
-			//	Mains_Good_Bad_Counter -= GRID_BAD_FAIL_RATE;
-			if(Mains_RMS > RMS_UPPER_LIMIT || Mains_RMS < RMS_LOWER_LIMIT)
+			int16_t Freq_Offset = (int16_t)PLL_PID.output;
+			if(Freq_Offset > FREQ_UPPER_LIMIT || Freq_Offset < FREQ_LOWER_LIMIT) 					// If mains frequency is whacky
 				Mains_Good_Bad_Counter -= GRID_BAD_FAIL_RATE;
-			if(ADC_Interleaved[1] > 2048)
+			if(Mains_RMS > RMS_UPPER_LIMIT || Mains_RMS < RMS_LOWER_LIMIT)								// If mains RMS voltage whacky
+				Mains_Good_Bad_Counter -= GRID_BAD_FAIL_RATE;
+			if(ADC_Interleaved[1] > V_SUPPLY_CUTOUT)																			// If our supply voltage too high (maybe we're sinking current)
 				Mains_Good_Bad_Counter -= GRID_BAD_FAIL_RATE;
 			
-			if(Mains_Good_Bad_Counter < RUNNING_MASK_CNT)	
+			if(Mains_Good_Bad_Counter < RUNNING_MASK_CNT)																	// Slowly return any errors back to our idle count	
 				Mains_Good_Bad_Counter++;
 			else
 				Mains_Good_Bad_Counter--;
@@ -340,7 +344,7 @@ int main(void)
 				Sine_Index = 0;
 				PID_I.iTerm = 0;
 				PID_I.lastInput = 0;
-				I_Output_Demand 	= START_UP_CURRENT;
+				I_Output_Demand = START_UP_CURRENT;
 				Mains_Good_Bad_Counter = RESTART_MASK_CNT;
 
 				while(Mains_Good_Bad_Counter < GRID_OK)	{																		// Remain paused until the mains RMS goes back in range
